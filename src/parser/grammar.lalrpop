@@ -1,0 +1,105 @@
+use super::*;
+
+grammar;
+
+Punctuated<T, S>: Vec<T> = {
+    <mut v:(<T> S)*> <e:T?> => {
+        if let Some(e) = e { v.push(e) }
+        v
+    },
+};
+
+pub Program: Vec<Item> = {
+    Item* => <>,
+};
+
+Item: Item = {
+    Stmt => Item::Stmt(<>),
+};
+Stmt: Stmt = {
+    "let" <Ident> "=" <Expr> ";" => Stmt::VarDecl(<>),
+    <LValue> "=" <Expr> ";" => Stmt::Assign(<>),
+};
+
+LValue: LValue = {
+    <Ident> => LValue::Ident(<>),
+    <ArrayIndex> => LValue::ArrayIndex(<>),
+    <KeyIndex> => LValue::KeyIndex(<>),
+};
+
+Expr: Expr = {
+    <cond:Disj> "?" <a:Expr> ":" <b:Expr> => Expr::Choice { condition: Box::new(cond), a: Box::new(a), b: Box::new(b) },
+    Disj => <>,
+};
+Disj: Expr = {
+    <a:Disj> "||" <b:Conj> => Expr::Or(Box::new(a), Box::new(b)),
+    Conj => <>,
+};
+Conj: Expr = {
+    <a:Conj> "&&" <b:CmpEq> => Expr::And(Box::new(a), Box::new(b)),
+    CmpEq => <>,
+};
+CmpEq: Expr = {
+    <a:CmpEq> "==" <b:Cmp> => Expr::Equ(Box::new(a), Box::new(b)),
+    <a:CmpEq> "!=" <b:Cmp> => Expr::Neq(Box::new(a), Box::new(b)),
+    Cmp => <>,
+};
+Cmp: Expr = {
+    <a:Cmp> "<" <b:Sum> => Expr::Less(Box::new(a), Box::new(b)),
+    <a:Cmp> "<=" <b:Sum> => Expr::LessEq(Box::new(a), Box::new(b)),
+    <a:Cmp> ">" <b:Sum> => Expr::Great(Box::new(a), Box::new(b)),
+    <a:Cmp> ">=" <b:Sum> => Expr::GreatEq(Box::new(a), Box::new(b)),
+    Sum => <>,
+};
+Sum: Expr = {
+    <a:Sum> "+" <b:Product> => Expr::Add(Box::new(a), Box::new(b)),
+    <a:Sum> "-" <b:Product> => Expr::Sub(Box::new(a), Box::new(b)),
+    Product => <>,
+};
+Product: Expr = {
+    <a:Product> "*" <b:Term> => Expr::Mul(Box::new(a), Box::new(b)),
+    <a:Product> "/" <b:Term> => Expr::Div(Box::new(a), Box::new(b)),
+    <a:Product> "%" <b:Term> => Expr::Mod(Box::new(a), Box::new(b)),
+    Term => <>,
+}
+Term: Expr = {
+    <l:@L> "+" <v:Term> => Expr::Pos(Box::new(v), l),
+    <l:@L> "-" <v:Term> => Expr::Neg(Box::new(v), l),
+    <l:@L> "!" <v:Term> => Expr::Not(Box::new(v), l),
+    Power => <>
+}
+Power: Expr = {
+    <a:Power> "^" <b:Atom> => Expr::Pow(Box::new(a), Box::new(b)),
+    Atom => <>,
+};
+Atom: Expr = {
+    Value => Expr::Value(<>),
+    "(" <Expr> ")" => <>,
+};
+
+Value: Value = {
+    Ident => Value::Ident(<>),
+    ArrayIndex => Value::ArrayIndex(<>),
+    KeyIndex => Value::KeyIndex(<>),
+    Number => Value::Number(<>),
+    Text => Value::Text(<>),
+    List => Value::List(<>),
+    Object => Value::Object(<>),
+};
+
+Ident: Ident = <l:@L> <v:r"[_a-zA-Z][_a-zA-Z0-9]*"> <r:@R> => Ident { id: String::from(v), raw_span: Span(l, r) };
+ArrayIndex: ArrayIndex = {
+    <a:Atom> "[" <b:Expr> "]" <r:@R> => ArrayIndex { src: Box::new(a), index: Box::new(b), span_right: r },
+};
+KeyIndex: KeyIndex = {
+    <a:Atom> "." "[" <b:Expr> "]" <r:@R> => KeyIndex { src: Box::new(a), key: Box::new(b), span_right: r },
+    <a:Atom> "." <b:Ident> => KeyIndex { src: Box::new(a), key: Box::new(Expr::Value(Value::Text(Text { content: b.id, raw_span: b.raw_span }))), span_right: b.raw_span.1 },
+};
+Number: Number = <l:@L> <v:r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?"> <r:@R> => Number { value: String::from(v), raw_span: Span(l, r) };
+Text: Text = <l:@L> <v:r#""(\\[\\nrt"']|[^\\"\r\n])*""#> <r:@R> => Text { content: clean_string(v), raw_span: Span(l, r) };
+List: List = <l:@L> "[" <values:Punctuated<Expr, ",">> "]" <r:@R> => List { values, raw_span: Span(l, r) };
+Object: Object = <l:@L> "{" <fields:Punctuated<Field, ",">> "}" <r:@R> => Object { fields, raw_span: Span(l, r) };
+Field: Field = {
+    <id:Text> ":" <value:Expr> => Field { id, value },
+    <id:Ident> ":" <value:Expr> => Field { id: Text { content: id.id, raw_span: id.raw_span }, value },
+};
