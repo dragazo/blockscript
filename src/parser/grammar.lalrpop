@@ -16,9 +16,19 @@ pub Program: Vec<Item> = {
 Item: Item = {
     Stmt => Item::Stmt(<>),
 };
+
 Stmt: Stmt = {
-    "let" <Ident> "=" <Expr> ";" => Stmt::VarDecl(<>),
-    <LValue> "=" <Expr> ";" => Stmt::Assign(<>),
+    VarDecl => Stmt::VarDecl(<>),
+    Assign => Stmt::Assign(<>),
+    IfElse => Stmt::IfElse(<>),
+};
+
+VarDecl: VarDecl = <span_left:@L> "let" <id:Ident> "=" <value:Expr> ";" => VarDecl { <> };
+Assign: Assign = <lvalue:LValue> "=" <value:Expr> ";" => Assign { <> };
+IfElse: IfElse = {
+    <l:@L> "if" <condition:Expr> "{" <then:Stmt*> "}" <r:@R> => IfElse { condition, then, otherwise: None, raw_span: Span(l, r) },
+    <l:@L> "if" <condition:Expr> "{" <then:Stmt*> "}" "else" "{" <other:Stmt*> "}" <r:@R> => IfElse { condition, then, otherwise: Some(other), raw_span: Span(l, r) },
+    <l:@L> "if" <condition:Expr> "{" <then:Stmt*> "}" "else" <next:IfElse> <r:@R> => IfElse { condition, then, otherwise: Some(vec![Stmt::IfElse(next)]), raw_span: Span(l, r) },
 };
 
 LValue: LValue = {
@@ -75,6 +85,7 @@ Power: Expr = {
 Atom: Expr = {
     Value => Expr::Value(<>),
     "(" <Expr> ")" => <>,
+    <target:Atom> "(" <args:Punctuated<Expr, ",">> ")" <r:@R> => Expr::FnCall { target: Box::new(target), args, span_right: r },
 };
 
 Value: Value = {

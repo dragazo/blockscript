@@ -71,6 +71,13 @@ fn quote_string(s: &str) -> String {
     res.push('"');
     res
 }
+fn indent(s: &str) -> String {
+    s.lines().map(|x| format!("    {}", x)).collect::<Vec<_>>().join("\n")
+}
+
+pub fn parse(program: &str) -> Result<Vec<Item>, Error> {
+    grammar::ProgramParser::new().parse(program)
+}
 
 /// The range of input making up some part of the AST
 /// 
@@ -83,11 +90,67 @@ pub struct Span(usize, usize);
 pub enum Item {
     Stmt(Stmt),
 }
+impl Item {
+    fn span(&self) -> Span {
+        match self {
+            Item::Stmt(x) => x.span(),
+        }
+    }
+}
+impl Display for Item {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Item::Stmt(x) => write!(f, "{}", x),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    VarDecl(Ident, Expr),
-    Assign(LValue, Expr),
+    VarDecl(VarDecl),
+    Assign(Assign),
+    IfElse(IfElse),
+}
+impl Stmt {
+    fn span(&self) -> Span {
+        match self {
+            Stmt::VarDecl(x) => x.span(),
+            Stmt::Assign(x) => x.span(),
+            Stmt::IfElse(x) => x.span(),
+        }
+    }
+}
+impl Display for Stmt {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Stmt::VarDecl(x) => write!(f, "{}", x),
+            Stmt::Assign(x) => write!(f, "{}", x),
+            Stmt::IfElse(x) => write!(f, "{}", x),
+        }
+    }
+}
+
+#[derive(Debug, Clone)] pub struct VarDecl { id: Ident, value: Expr, span_left: usize }
+#[derive(Debug, Clone)] pub struct Assign { lvalue: LValue, value: Expr }
+#[derive(Debug, Clone)] pub struct IfElse { condition: Expr, then: Vec<Stmt>, otherwise: Option<Vec<Stmt>>, raw_span: Span }
+
+impl VarDecl { pub fn span(&self) -> Span { Span(self.span_left, self.value.span().1) } }
+impl Assign { pub fn span(&self) -> Span { Span(self.lvalue.span().0, self.value.span().1) } }
+raw_span_impl! { IfElse }
+
+impl Display for VarDecl { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "let {} = {};", self.id, self.value) } }
+impl Display for Assign { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{} = {};", self.lvalue, self.value) } }
+impl Display for IfElse {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "if {} {{\n{}\n}}", self.condition, indent(&Punctuated(&self.then, "\n").to_string()))?;
+        match &self.otherwise {
+            Some(e) => match e.as_slice() {
+                [Stmt::IfElse(next)] => write!(f, " else {}", next),
+                otherwise => write!(f, " else {{\n{}\n}}", indent(&Punctuated(otherwise, "\n").to_string())),
+            }
+            None => Ok(())
+        }
+    }  
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +181,8 @@ pub enum Expr {
     Pos(Box<Expr>, usize),
     Neg(Box<Expr>, usize),
     Not(Box<Expr>, usize),
+
+    FnCall { target: Box<Expr>, args: Vec<Expr>, span_right: usize },
 
     Value(Value),
 }
@@ -150,6 +215,8 @@ impl Expr {
             Expr::Pos(v, span_left) => Span(*span_left, v.span().1),
             Expr::Neg(v, span_left) => Span(*span_left, v.span().1),
             Expr::Not(v, span_left) => Span(*span_left, v.span().1),
+
+            Expr::FnCall { target, span_right, .. } => Span(target.span().0, *span_right),
 
             Expr::Value(v) => v.span(),
         }
@@ -185,6 +252,8 @@ impl Display for Expr {
             Expr::Neg(val, _) => write!(f, "(-{})", val),
             Expr::Not(val, _) => write!(f, "(!{})", val),
 
+            Expr::FnCall { target, args, .. } => write!(f, "({}({}))", target, Punctuated(args, ", ")),
+
             Expr::Value(val) => write!(f, "{}", val),
         }
     }
@@ -195,6 +264,24 @@ pub enum LValue {
     Ident(Ident),
     ArrayIndex(ArrayIndex),
     KeyIndex(KeyIndex),
+}
+impl LValue {
+    fn span(&self) -> Span {
+        match self {
+            LValue::Ident(x) => x.span(),
+            LValue::ArrayIndex(x) => x.span(),
+            LValue::KeyIndex(x) => x.span(),
+        }
+    }
+}
+impl Display for LValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            LValue::Ident(x) => write!(f, "{}", x),
+            LValue::ArrayIndex(x) => write!(f, "{}", x),
+            LValue::KeyIndex(x) => write!(f, "{}", x),
+        }
+    }
 }
 
 #[derive(Debug, Clone)] pub struct Ident { id: String, raw_span: Span }
@@ -259,7 +346,7 @@ impl Display for Value {
 
 #[cfg(test)]
 fn get_single_stmt(prog: &str) -> Result<Stmt, Error> {
-    let r = grammar::ProgramParser::new().parse(prog)?;
+    let r = parse(prog)?;
     assert_eq!(r.len(), 1);
     match r.into_iter().next().unwrap() {
         Item::Stmt(s) => Ok(s),
@@ -270,21 +357,21 @@ fn get_single_stmt(prog: &str) -> Result<Stmt, Error> {
 #[test]
 fn test_parse_number() {
     match get_single_stmt("_ = 22;").unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Number(num))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Number(num)), .. }) => {
             assert_eq!(num.value, "22");
             assert_eq!(num.span(), Span(4, 6));
         }
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 22.43;").unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Number(num))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Number(num)), .. }) => {
             assert_eq!(num.value, "22.43");
             assert_eq!(num.span(), Span(4, 9));
         }
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = +22.43e56;").unwrap() {
-        Stmt::Assign(_, Expr::Pos(x, span_left)) => match *x {
+        Stmt::Assign(Assign { value: Expr::Pos(x, span_left), .. }) => match *x {
             Expr::Value(Value::Number(num)) => {
                 assert_eq!(num.value, "22.43e56");
                 assert_eq!(num.span(), Span(5, 13));
@@ -295,14 +382,14 @@ fn test_parse_number() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 22e+56;").unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Number(num))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Number(num)), .. }) => {
             assert_eq!(num.value, "22e+56");
             assert_eq!(num.span(), Span(4, 10));
         }
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 0.1e-56;").unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Number(num))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Number(num)), .. }) => {
             assert_eq!(num.value, "0.1e-56");
             assert_eq!(num.span(), Span(4, 11));
         }
@@ -312,41 +399,41 @@ fn test_parse_number() {
 #[test]
 fn test_prec() {
     match get_single_stmt("_ = 22+34+3;").unwrap() {
-        Stmt::Assign(_, x) => assert_eq!(format!("{}", x), "((22 + 34) + 3)"),
+        Stmt::Assign(Assign { value: x, .. }) => assert_eq!(format!("{}", x), "((22 + 34) + 3)"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 1+2*3+4;").unwrap() {
-        Stmt::Assign(_, x) => assert_eq!(format!("{}", x), "((1 + (2 * 3)) + 4)"),
+        Stmt::Assign(Assign { value: x, .. }) => assert_eq!(format!("{}", x), "((1 + (2 * 3)) + 4)"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 1+2*(3+4);").unwrap() {
-        Stmt::Assign(_, x) => assert_eq!(format!("{}", x), "(1 + (2 * (3 + 4)))"),
+        Stmt::Assign(Assign { value: x, .. }) => assert_eq!(format!("{}", x), "(1 + (2 * (3 + 4)))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 1+2*(3+4);").unwrap() {
-        Stmt::Assign(_, x) => assert_eq!(format!("{}", x), "(1 + (2 * (3 + 4)))"),
+        Stmt::Assign(Assign { value: x, .. }) => assert_eq!(format!("{}", x), "(1 + (2 * (3 + 4)))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 1+2*(-3+4);").unwrap() {
-        Stmt::Assign(_, x) => assert_eq!(format!("{}", x), "(1 + (2 * ((-3) + 4)))"),
+        Stmt::Assign(Assign { value: x, .. }) => assert_eq!(format!("{}", x), "(1 + (2 * ((-3) + 4)))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt("_ = 1+2*-(-3+4);").unwrap() {
-        Stmt::Assign(_, x) => assert_eq!(format!("{}", x), "(1 + (2 * (-((-3) + 4))))"),
+        Stmt::Assign(Assign { value: x, .. }) => assert_eq!(format!("{}", x), "(1 + (2 * (-((-3) + 4))))"),
         x => panic!("{:?}", x),
     }
 }
 #[test]
 fn test_parse_text() {
     match get_single_stmt(r#"_ ="heloo world";"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Text(txt))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Text(txt)), .. }) => {
             assert_eq!(txt.content, "heloo world");
             assert_eq!(txt.span(), Span(3, 16));
         }
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ ="heloo \"world";"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Text(txt))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Text(txt)), .. }) => {
             assert_eq!(txt.content, "heloo \"world");
             assert_eq!(txt.span(), Span(3, 18));
         }
@@ -362,7 +449,7 @@ fn test_parse_text() {
 #[test]
 fn test_parse_list() {
     match get_single_stmt(r#"_ = [];"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::List(list))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::List(list)), .. }) => {
             assert_eq!(list.values.len(), 0);
             assert_eq!(list.span(), Span(4, 6));
             assert_eq!(list.to_string(), "[]");
@@ -370,7 +457,7 @@ fn test_parse_list() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = [   "hello "];"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::List(list))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::List(list)), .. }) => {
             assert_eq!(list.values.len(), 1);
             assert_eq!(list.span(), Span(4, 17));
             match &list.values[0] {
@@ -385,7 +472,7 @@ fn test_parse_list() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = [   [],];"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::List(list))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::List(list)), .. }) => {
             assert_eq!(list.values.len(), 1);
             assert_eq!(list.span(), Span(4, 12));
             match &list.values[0] {
@@ -410,7 +497,7 @@ fn test_parse_list() {
 #[test]
 fn test_parse_object() {
     match get_single_stmt(r#"_ = {};"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Object(obj))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Object(obj)), .. }) => {
             assert_eq!(obj.fields.len(), 0);
             assert_eq!(obj.span(), Span(4, 6));
             assert_eq!(format!("{}", Value::Object(obj)), r"{}");
@@ -418,7 +505,7 @@ fn test_parse_object() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = {foo: 5};"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Object(obj))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Object(obj)), .. }) => {
             assert_eq!(obj.fields.len(), 1);
             assert_eq!(obj.fields[0].id.content, "foo");
             assert_eq!(format!("{}", obj.fields[0].value), "5");
@@ -427,7 +514,7 @@ fn test_parse_object() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = {foo: [], "bar\"":"merp\n"};"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::Object(obj))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::Object(obj)), .. }) => {
             assert_eq!(obj.span(), Span(4, 31));
             assert_eq!(obj.fields.len(), 2);
             assert_eq!(obj.fields[0].id.content, "foo");
@@ -442,7 +529,7 @@ fn test_parse_object() {
 #[test]
 fn test_access() {
     match get_single_stmt(r#"_ = abc[6];"#).unwrap() {
-        Stmt::Assign(_, Expr::Value(Value::ArrayIndex(index))) => {
+        Stmt::Assign(Assign { value: Expr::Value(Value::ArrayIndex(index)), .. }) => {
             match index.src.as_ref() {
                 Expr::Value(Value::Ident(id)) => {
                     assert_eq!(id.id, "abc");
@@ -462,7 +549,7 @@ fn test_access() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = -abc[6];"#).unwrap() {
-        Stmt::Assign(_, Expr::Neg(val, span_left)) => match *val {
+        Stmt::Assign(Assign { value: Expr::Neg(val, span_left), .. }) => match *val {
             Expr::Value(Value::ArrayIndex(index)) => {
                 match index.src.as_ref() {
                     Expr::Value(Value::Ident(id)) => {
@@ -487,7 +574,7 @@ fn test_access() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = -abc.fieldName;"#).unwrap() {
-        Stmt::Assign(_, Expr::Neg(val, span_left)) => match *val {
+        Stmt::Assign(Assign { value: Expr::Neg(val, span_left), .. }) => match *val {
             Expr::Value(Value::KeyIndex(index)) => {
                 match index.src.as_ref() {
                     Expr::Value(Value::Ident(id)) => {
@@ -510,7 +597,7 @@ fn test_access() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = -abc.["fieldName"];"#).unwrap() {
-        Stmt::Assign(_, Expr::Neg(val, span_left)) => match *val {
+        Stmt::Assign(Assign { value: Expr::Neg(val, span_left), .. }) => match *val {
             Expr::Value(Value::KeyIndex(index)) => {
                 match index.src.as_ref() {
                     Expr::Value(Value::Ident(id)) => {
@@ -533,7 +620,7 @@ fn test_access() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = -abc.[fieldName];"#).unwrap() {
-        Stmt::Assign(_, Expr::Neg(val, span_left)) => match *val {
+        Stmt::Assign(Assign { value: Expr::Neg(val, span_left), .. }) => match *val {
             Expr::Value(Value::KeyIndex(index)) => {
                 match index.src.as_ref() {
                     Expr::Value(Value::Ident(id)) => {
@@ -557,15 +644,23 @@ fn test_access() {
     }
 
     match get_single_stmt(r#"_ = -res.a.b.c;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "(-(((res.[\"a\"]).[\"b\"]).[\"c\"]))"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(-(((res.[\"a\"]).[\"b\"]).[\"c\"]))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = !res.a[-17].c;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "(!(((res.[\"a\"])[(-17)]).[\"c\"]))"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(!(((res.[\"a\"])[(-17)]).[\"c\"]))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = !res.a.[v].c;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "(!(((res.[\"a\"]).[v]).[\"c\"]))"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(!(((res.[\"a\"]).[v]).[\"c\"]))"),
+        x => panic!("{:?}", x),
+    }
+    match get_single_stmt(r#"_ = !res(1);"#).unwrap() {
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(!(res(1)))"),
+        x => panic!("{:?}", x),
+    }
+    match get_single_stmt(r#"_ = !res(1).a;"#).unwrap() {
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(!((res(1)).[\"a\"]))"),
         x => panic!("{:?}", x),
     }
 }
@@ -573,9 +668,9 @@ fn test_access() {
 #[test]
 fn test_var_decl_assign() {
     match get_single_stmt(r#"let foo = {};"#).unwrap() {
-        Stmt::VarDecl(id, val) => {
+        Stmt::VarDecl(VarDecl { id, value, .. }) => {
             assert_eq!(id.id, "foo");
-            match val {
+            match value {
                 Expr::Value(Value::Object(obj)) => {
                     assert_eq!(obj.fields.len(), 0);
                     assert_eq!(obj.span(), Span(10, 12));
@@ -587,7 +682,7 @@ fn test_var_decl_assign() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"letfoo = {};"#).unwrap() {
-        Stmt::Assign(lvalue, val) => {
+        Stmt::Assign(Assign { lvalue, value, .. }) => {
             match lvalue {
                 LValue::Ident(id) => {
                     assert_eq!(id.id, "letfoo");
@@ -595,7 +690,7 @@ fn test_var_decl_assign() {
                 }
                 x => panic!("{:?}", x),
             }
-            match val {
+            match value {
                 Expr::Value(Value::Object(x)) => {
                     assert_eq!(x.fields.len(), 0);
                     assert_eq!(x.span(), Span(9, 11));
@@ -606,7 +701,7 @@ fn test_var_decl_assign() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"  letfoo  [  7    ]    ={   }   ;"#).unwrap() {
-        Stmt::Assign(lvalue, val) => {
+        Stmt::Assign(Assign { lvalue, value, .. }) => {
             match lvalue {
                 LValue::ArrayIndex(index) => {
                     match index.src.as_ref() {
@@ -627,7 +722,7 @@ fn test_var_decl_assign() {
                 }
                 x => panic!("{:?}", x),
             }
-            match val {
+            match value {
                 Expr::Value(Value::Object(x)) => {
                     assert_eq!(x.fields.len(), 0);
                     assert_eq!(x.span(), Span(24, 29));
@@ -638,7 +733,7 @@ fn test_var_decl_assign() {
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"  letfoo . baz    ={   }   ;"#).unwrap() {
-        Stmt::Assign(lvalue, val) => {
+        Stmt::Assign(Assign { lvalue, value }) => {
             match lvalue {
                 LValue::KeyIndex(index) => {
                     match index.src.as_ref() {
@@ -659,7 +754,7 @@ fn test_var_decl_assign() {
                 }
                 x => panic!("{:?}", x),
             }
-            match val {
+            match value {
                 Expr::Value(Value::Object(x)) => {
                     assert_eq!(x.fields.len(), 0);
                     assert_eq!(x.span(), Span(19, 24));
@@ -673,23 +768,23 @@ fn test_var_decl_assign() {
 #[test]
 fn test_op_assoc() {
     match get_single_stmt(r#"_ = 1 == 17 ? 2 + -3^3 : a[6];"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "((1 == 17) ? (2 + (-(3 ^ 3))) : (a[6]))"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "((1 == 17) ? (2 + (-(3 ^ 3))) : (a[6]))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = 1 ? 2 ? 3 : 4 : 5;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "(1 ? (2 ? 3 : 4) : 5)"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(1 ? (2 ? 3 : 4) : 5)"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = 1 ? 2 : 3 ? 4 : 5;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "(1 ? 2 : (3 ? 4 : 5))"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "(1 ? 2 : (3 ? 4 : 5))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = 1 < 2 == 3 < 4;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "((1 < 2) == (3 < 4))"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "((1 < 2) == (3 < 4))"),
         x => panic!("{:?}", x),
     }
     match get_single_stmt(r#"_ = a || b && c || d;"#).unwrap() {
-        Stmt::Assign(_, val) => assert_eq!(format!("{}", val), "((a || (b && c)) || d)"),
+        Stmt::Assign(Assign { value, .. }) => assert_eq!(format!("{}", value), "((a || (b && c)) || d)"),
         x => panic!("{:?}", x),
     }
 }
